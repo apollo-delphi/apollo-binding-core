@@ -17,7 +17,8 @@ uses
   DUnitX.Loggers.Xml.NUnit,
   DUnitX.TestFramework,
   tstApollo_Binding_Core in 'tstApollo_Binding_Core.pas',
-  Apollo_Binding_Core in 'Apollo_Binding_Core.pas';
+  Apollo_Binding_Core in 'Apollo_Binding_Core.pas',
+  Apollo_Types in '..\Vendors\Apollo_Types\Apollo_Types.pas';
 
 begin
   Application.Initialize;
