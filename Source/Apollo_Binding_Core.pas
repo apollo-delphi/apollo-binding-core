@@ -11,16 +11,14 @@ uses
 type
   TBindItem = class
   strict private
-    FCIndex: Integer;
-    FControl: TComponent;
-    FNativeEvent: TNotifyEvent;
+    [weak]FControl: TObject;
     FPropName: string;
-    FSource: TObject;
+    [weak]FSecondaryControl: TObject;
+    [weak]FSource: TObject;
   public
-    property CIndex: Integer read FCIndex write FCIndex;
-    property Control: TComponent read FControl write FControl;
-    property NativeEvent: TNotifyEvent read FNativeEvent write FNativeEvent;
+    property Control: TObject read FControl write FControl;
     property PropName: string read FPropName write FPropName;
+    property SecondaryControl: TObject read FSecondaryControl write FSecondaryControl;
     property Source: TObject read FSource write FSource;
   end;
 
@@ -33,29 +31,31 @@ type
     procedure Notification(AComponent: TComponent; Operation: TOperation); override;
   end;
 
-  TBindingEngine = class abstract(TInterfacedObject)
+  TBindingEngine = class abstract
   private
     FBindItemList: TObjectList<TBindItem>;
     FControlFreeNotification: TControlFreeNotification;
+    FControlNativeEvents: TDictionary<TObject, TMethod>;
     procedure AddSourceFreeNotification(aSource: TObject);
     procedure AddControlFreeNotification(aControl: TComponent);
     procedure RemoveBindItems(const aBindItems: TArray<TBindItem>);
     procedure SourceFreeNotification(Sender: TObject);
   protected
-    function AddBindItem(aSource: TObject; const aPropName: string;
-      aControl: TComponent; const aIndex: Integer): TBindItem;
+    function AddBindItem(aSource: TObject; const aPropName: string; aControl: TObject): TBindItem;
     function GetMatchedSourceProperty(const aControlNamePrefix, aControlName: string;
       const RttiProperties: TArray<TRttiProperty>): TRttiProperty;
-    procedure BindPropertyToControl(aSource: TObject; aRttiProperty: TRttiProperty; aControl: TComponent); virtual; abstract;
-    procedure DoBind(aSource: TObject; aControl: TComponent; const aControlNamePrefix: string;
+    function TryGetNativeEvent(aControl: TComponent; out aMethod: TMethod): Boolean;
+    procedure BindPropertyToControl(aSource: TObject; aRttiProperty: TRttiProperty; aControl: TObject); virtual; abstract;
+    procedure DoBind(aSource: TObject; aControl: TObject; const aControlNamePrefix: string;
       aRttiProperties: TArray<TRttiProperty>); virtual; abstract;
+    procedure SetNativeEvent(aControl: TComponent; aMethod: TMethod);
   public
-    function GetBindItem(aControl: TComponent; const aIndex: Integer = 0): TBindItem;
-    function GetBindItems(aControl: TComponent): TArray<TBindItem>; overload;
-    function GetBindItems(aSource: TObject): TArray<TBindItem>; overload;
-    procedure Bind(aSource: TObject; aRootControl: TComponent; const aControlNamePrefix: string = '');
+    function GetFirstBindItem(aControl: TObject): TBindItem;
+    function GetBindItemsByControl(aControl: TObject): TArray<TBindItem>;
+    function GetBindItemsBySource(aSource: TObject): TArray<TBindItem>;
+    procedure Bind(aSource: TObject; aRootControl: TObject; const aControlNamePrefix: string = '');
     procedure Notify(aSource: TObject);
-    procedure SingleBind(aSource: TObject; aControl: TComponent; const aIndex: Integer);
+    procedure SingleBind(aSource: TObject; aControl: TObject);
     constructor Create;
     destructor Destroy; override;
   end;
@@ -70,6 +70,7 @@ uses
 constructor TBindingEngine.Create;
 begin
   FBindItemList := TObjectList<TBindItem>.Create(False);
+  FControlNativeEvents := TDictionary<TObject, TMethod>.Create;
 
   FControlFreeNotification := TControlFreeNotification.Create(nil);
   FControlFreeNotification.FBindingEngine := Self;
@@ -78,6 +79,7 @@ end;
 destructor TBindingEngine.Destroy;
 begin
   FControlFreeNotification.Free;
+  FControlNativeEvents.Free;
   FBindItemList.Free;
 
   inherited;
@@ -94,18 +96,18 @@ begin
   end;
 end;
 
-function TBindingEngine.GetBindItem(aControl: TComponent; const aIndex: Integer): TBindItem;
+function TBindingEngine.GetFirstBindItem(aControl: TObject): TBindItem;
 var
   BindItem: TBindItem;
 begin
   Result := nil;
 
   for BindItem in FBindItemList do
-    if (BindItem.Control = aControl) and (BindItem.CIndex = aIndex) then
+    if BindItem.Control = aControl then
       Exit(BindItem);
 end;
 
-function TBindingEngine.GetBindItems(aControl: TComponent): TArray<TBindItem>;
+function TBindingEngine.GetBindItemsByControl(aControl: TObject): TArray<TBindItem>;
 var
   BindItem: TBindItem;
 begin
@@ -116,7 +118,7 @@ begin
       Result := Result + [BindItem];
 end;
 
-function TBindingEngine.GetBindItems(aSource: TObject): TArray<TBindItem>;
+function TBindingEngine.GetBindItemsBySource(aSource: TObject): TArray<TBindItem>;
 var
   BindItem: TBindItem;
 begin
@@ -154,7 +156,7 @@ var
   RttiContext: TRttiContext;
   RttiProperty: TRttiProperty;
 begin
-  BindItems := GetBindItems(aSource);
+  BindItems := GetBindItemsBySource(aSource);
 
   RttiContext := TRttiContext.Create;
   try
@@ -169,22 +171,16 @@ begin
 end;
 
 function TBindingEngine.AddBindItem(aSource: TObject; const aPropName: string;
-  aControl: TComponent; const aIndex: Integer): TBindItem;
-var
-  BindItem: TBindItem;
+  aControl: TObject): TBindItem;
 begin
-  BindItem := GetBindItem(aControl, aIndex);
-  if Assigned(BindItem) then
-    RemoveBindItems([BindItem]);
-
   Result := TBindItem.Create;
   Result.Source := aSource;
   Result.PropName := aPropName;
   Result.Control := aControl;
-  Result.CIndex := aIndex;
 
   FBindItemList.Add(Result);
-  AddControlFreeNotification(aControl);
+  if aControl.InheritsFrom(TComponent) then
+    AddControlFreeNotification(TComponent(aControl));
 end;
 
 procedure TBindingEngine.AddControlFreeNotification(aControl: TComponent);
@@ -200,7 +196,7 @@ begin
     SourceFreeNotify.AddFreeNotify(SourceFreeNotification);
 end;
 
-procedure TBindingEngine.Bind(aSource: TObject; aRootControl: TComponent;
+procedure TBindingEngine.Bind(aSource: TObject; aRootControl: TObject;
   const aControlNamePrefix: string);
 var
   RttiContext: TRttiContext;
@@ -216,10 +212,15 @@ begin
   end;
 end;
 
-procedure TBindingEngine.SingleBind(aSource: TObject; aControl: TComponent;
-  const aIndex: Integer);
+procedure TBindingEngine.SetNativeEvent(aControl: TComponent; aMethod: TMethod);
 begin
-  AddBindItem(aSource, '', aControl, aIndex);
+  if not FControlNativeEvents.ContainsKey(aControl) then
+    FControlNativeEvents.Add(aControl, aMethod);
+end;
+
+procedure TBindingEngine.SingleBind(aSource: TObject; aControl: TObject);
+begin
+  AddBindItem(aSource, '', aControl);
   AddSourceFreeNotification(aSource);
 end;
 
@@ -227,8 +228,17 @@ procedure TBindingEngine.SourceFreeNotification(Sender: TObject);
 var
   BindItems: TArray<TBindItem>;
 begin
-  BindItems := GetBindItems(Sender);
+  BindItems := GetBindItemsBySource(Sender);
   RemoveBindItems(BindItems);
+end;
+
+function TBindingEngine.TryGetNativeEvent(aControl: TComponent;
+  out aMethod: TMethod): Boolean;
+begin
+  if FControlNativeEvents.TryGetValue(aControl, aMethod) then
+    Result := True
+  else
+    Result := False;
 end;
 
 { TControlFreeNotification }
@@ -242,8 +252,11 @@ begin
 
   if Operation = opRemove then
   begin
-    BindItems := FBindingEngine.GetBindItems(AComponent);
+    BindItems := FBindingEngine.GetBindItemsByControl(AComponent);
     FBindingEngine.RemoveBindItems(BindItems);
+
+    if FBindingEngine.FControlNativeEvents.ContainsKey(AComponent) then
+      FBindingEngine.FControlNativeEvents.Remove(AComponent);
   end;
 end;
 
