@@ -36,26 +36,30 @@ type
     FBindItemList: TObjectList<TBindItem>;
     FControlFreeNotification: TControlFreeNotification;
     FControlNativeEvents: TDictionary<TObject, TMethod>;
+    function GetBindItem(aSource, aControl: TObject): TBindItem;
     procedure AddSourceFreeNotification(aSource: TObject);
     procedure AddControlFreeNotification(aControl: TComponent);
     procedure RemoveBindItems(const aBindItems: TArray<TBindItem>);
     procedure SourceFreeNotification(Sender: TObject);
   protected
+    FBindItemAlreadyExists: Boolean;
     function AddBindItem(aSource: TObject; const aPropName: string; aControl: TObject): TBindItem;
     function GetMatchedSourceProperty(const aControlNamePrefix, aControlName: string;
       const RttiProperties: TArray<TRttiProperty>): TRttiProperty;
     function TryGetNativeEvent(aControl: TComponent; out aMethod: TMethod): Boolean;
-    procedure BindPropertyToControl(aSource: TObject; aRttiProperty: TRttiProperty; aControl: TObject); virtual; abstract;
+    procedure BindPropertyToControl(aSource: TObject; aRttiProperty: TRttiProperty;
+      aControl: TObject); virtual;
     procedure DoBind(aSource: TObject; aControl: TObject; const aControlNamePrefix: string;
       aRttiProperties: TArray<TRttiProperty>); virtual; abstract;
     procedure SetNativeEvent(aControl: TComponent; aMethod: TMethod);
   public
-    function GetFirstBindItem(aControl: TObject): TBindItem;
     function GetBindItemsByControl(aControl: TObject): TArray<TBindItem>;
     function GetBindItemsBySource(aSource: TObject): TArray<TBindItem>;
+    function GetFirstBindItem(aControl: TObject): TBindItem;
     procedure Bind(aSource: TObject; aRootControl: TObject; const aControlNamePrefix: string = '');
+    procedure BindToListControl(aSource: TObject; aControl: TObject);
+    procedure ClearControl(aControl: TObject);
     procedure Notify(aSource: TObject);
-    procedure SingleBind(aSource: TObject; aControl: TObject);
     constructor Create;
     destructor Destroy; override;
   end;
@@ -66,6 +70,17 @@ uses
   System.SysUtils;
 
 { TBindingEngine }
+
+procedure TBindingEngine.ClearControl(aControl: TObject);
+var
+  BindItems: TArray<TBindItem>;
+begin
+  BindItems := GetBindItemsByControl(aControl);
+  RemoveBindItems(BindItems);
+
+  if FControlNativeEvents.ContainsKey(aControl) then
+    FControlNativeEvents.Remove(aControl);
+end;
 
 constructor TBindingEngine.Create;
 begin
@@ -104,6 +119,17 @@ begin
 
   for BindItem in FBindItemList do
     if BindItem.Control = aControl then
+      Exit(BindItem);
+end;
+
+function TBindingEngine.GetBindItem(aSource, aControl: TObject): TBindItem;
+var
+  BindItem: TBindItem;
+begin
+  Result := nil;
+
+  for BindItem in FBindItemList do
+    if (BindItem.Source = aSource) and (BindItem.Control = aControl) then
       Exit(BindItem);
 end;
 
@@ -212,15 +238,27 @@ begin
   end;
 end;
 
+procedure TBindingEngine.BindPropertyToControl(aSource: TObject;
+  aRttiProperty: TRttiProperty; aControl: TObject);
+var
+  BindItem: TBindItem;
+begin
+  BindItem := GetBindItem(aSource, aControl);
+  if Assigned(BindItem) then
+    FBindItemAlreadyExists := True
+  else
+    FBindItemAlreadyExists := False;
+end;
+
 procedure TBindingEngine.SetNativeEvent(aControl: TComponent; aMethod: TMethod);
 begin
   if not FControlNativeEvents.ContainsKey(aControl) then
     FControlNativeEvents.Add(aControl, aMethod);
 end;
 
-procedure TBindingEngine.SingleBind(aSource: TObject; aControl: TObject);
+procedure TBindingEngine.BindToListControl(aSource: TObject; aControl: TObject);
 begin
-  AddBindItem(aSource, '', aControl);
+  DoBind(aSource, aControl, '', []);
   AddSourceFreeNotification(aSource);
 end;
 
@@ -245,19 +283,11 @@ end;
 
 procedure TControlFreeNotification.Notification(AComponent: TComponent;
   Operation: TOperation);
-var
-  BindItems: TArray<TBindItem>;
 begin
   inherited;
 
   if Operation = opRemove then
-  begin
-    BindItems := FBindingEngine.GetBindItemsByControl(AComponent);
-    FBindingEngine.RemoveBindItems(BindItems);
-
-    if FBindingEngine.FControlNativeEvents.ContainsKey(AComponent) then
-      FBindingEngine.FControlNativeEvents.Remove(AComponent);
-  end;
+    FBindingEngine.ClearControl(AComponent);
 end;
 
 end.
