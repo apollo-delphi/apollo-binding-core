@@ -3,7 +3,6 @@ unit Apollo_Binding_Core;
 interface
 
 uses
-  Apollo_Types,
   System.Classes,
   System.Generics.Collections,
   System.Rtti;
@@ -11,14 +10,14 @@ uses
 type
   TBindItem = class
   strict private
-    [weak]FControl: TObject;
+    FControl: TObject;
+    FNew: Boolean;
     FPropName: string;
-    [weak]FSecondaryControl: TObject;
-    [weak]FSource: TObject;
+    FSource: TObject;
   public
     property Control: TObject read FControl write FControl;
+    property New: Boolean read FNew write FNew;
     property PropName: string read FPropName write FPropName;
-    property SecondaryControl: TObject read FSecondaryControl write FSecondaryControl;
     property Source: TObject read FSource write FSource;
   end;
 
@@ -36,30 +35,35 @@ type
     FBindItemList: TObjectList<TBindItem>;
     FControlFreeNotification: TControlFreeNotification;
     FControlNativeEvents: TDictionary<TObject, TMethod>;
-    function GetBindItem(aSource, aControl: TObject): TBindItem;
-    procedure AddSourceFreeNotification(aSource: TObject);
-    procedure AddControlFreeNotification(aControl: TComponent);
-    procedure RemoveBindItems(const aBindItems: TArray<TBindItem>);
-    procedure SourceFreeNotification(Sender: TObject);
-  protected
-    FBindItemAlreadyExists: Boolean;
-    function AddBindItem(aSource: TObject; const aPropName: string; aControl: TObject): TBindItem;
-    function GetMatchedSourceProperty(const aControlNamePrefix, aControlName: string;
-      const RttiProperties: TArray<TRttiProperty>): TRttiProperty;
-    function TryGetNativeEvent(aControl: TComponent; out aMethod: TMethod): Boolean;
-    procedure BindPropertyToControl(aSource: TObject; aRttiProperty: TRttiProperty;
-      aControl: TObject); virtual;
-    procedure DoBind(aSource: TObject; aControl: TObject; const aControlNamePrefix: string;
-      aRttiProperties: TArray<TRttiProperty>); virtual; abstract;
-    procedure SetNativeEvent(aControl: TComponent; aMethod: TMethod);
-  public
+    FLastBindedControlItemIndex: Integer;
+    function AddBindItem(aSource: TObject; aControl: TObject; aRttiProperty: TRttiProperty): TBindItem;
+    function GetBindItem(aSource: TObject; aControl: TObject): TBindItem;
     function GetBindItemsByControl(aControl: TObject): TArray<TBindItem>;
     function GetBindItemsBySource(aSource: TObject): TArray<TBindItem>;
+    function GetMatchedSourceProperty(const aControlNamePrefix, aControlName: string;
+      const aSourceProperties: TArray<TRttiProperty>): TRttiProperty;
+    procedure AddControlFreeNotification(aControl: TComponent);
+    procedure AddSourceFreeNotification(aSource: TObject);
+    procedure DoBind(aSource: TObject; aControl: TObject; aRttiProperty: TRttiProperty);
+    procedure ProcessControl(const aControlNamePrefix: string; aControl, aSource: TObject;
+      aSourceProperties: TArray<TRttiProperty>);
+    procedure RemoveBindItemsByControl(aControl: TObject);
+    procedure RemoveBindItemsBySource(aSource: TObject);
+    procedure SourceFreeNotification(Sender: TObject);
+  protected
     function GetFirstBindItem(aControl: TObject): TBindItem;
+    function GetSourceFromControl(aControl: TObject): TObject; virtual; abstract;
+    function IsValidControl(aControl: TObject; out aControlName: string;
+      out aChildControls: TArray<TObject>): Boolean; virtual; abstract;
+    function TryGetNativeEvent(aControl: TObject; out aMethod: TMethod): Boolean;
+    procedure ApplyToControls(aBindItem: TBindItem; aRttiProperty: TRttiProperty); virtual; abstract;
+    procedure SetLastBindedControlItemIndex(const aValue: Integer);
+    procedure SetNativeEvent(aControl: TObject; aMethod: TMethod);
+  public
+    function BindToControlItem(aSource: TObject; aControl: TObject): Integer;
+    function GetSource(aControl: TObject): TObject;
     procedure Bind(aSource: TObject; aRootControl: TObject; const aControlNamePrefix: string = '');
-    procedure BindToListControl(aSource: TObject; aControl: TObject);
-    procedure ClearControl(aControl: TObject);
-    procedure Notify(aSource: TObject);
+    procedure RemoveBind(aRootControl: TObject);
     constructor Create;
     destructor Destroy; override;
   end;
@@ -67,24 +71,66 @@ type
 implementation
 
 uses
+  Apollo_Types,
   System.SysUtils;
 
 { TBindingEngine }
 
-procedure TBindingEngine.ClearControl(aControl: TObject);
-var
-  BindItems: TArray<TBindItem>;
+function TBindingEngine.AddBindItem(aSource, aControl: TObject; aRttiProperty: TRttiProperty): TBindItem;
 begin
-  BindItems := GetBindItemsByControl(aControl);
-  RemoveBindItems(BindItems);
+  Result := TBindItem.Create;
+  Result.Source := aSource;
+  Result.Control := aControl;
+  Result.New := True;
 
-  if FControlNativeEvents.ContainsKey(aControl) then
-    FControlNativeEvents.Remove(aControl);
+  if Assigned(aRttiProperty) then
+    Result.PropName := aRttiProperty.Name;
+
+  FBindItemList.Add(Result);
+
+  if aControl.InheritsFrom(TComponent) then
+    AddControlFreeNotification(TComponent(aControl));
+
+  AddSourceFreeNotification(aSource);
+end;
+
+procedure TBindingEngine.AddControlFreeNotification(aControl: TComponent);
+begin
+  aControl.FreeNotification(FControlFreeNotification);
+end;
+
+procedure TBindingEngine.AddSourceFreeNotification(aSource: TObject);
+var
+  SourceFreeNotify: ISourceFreeNotification;
+begin
+  if aSource.GetInterface(ISourceFreeNotification, SourceFreeNotify) then
+    SourceFreeNotify.AddFreeNotify(SourceFreeNotification);
+end;
+
+procedure TBindingEngine.Bind(aSource, aRootControl: TObject;
+  const aControlNamePrefix: string);
+var
+  RttiContext: TRttiContext;
+  SourceProperties: TArray<TRttiProperty>;
+begin
+  RttiContext := TRttiContext.Create;
+  try
+    SourceProperties := RttiContext.GetType(aSource.ClassType).GetProperties;
+    ProcessControl(aControlNamePrefix, aRootControl, aSource, SourceProperties);
+  finally
+    RttiContext.Free;
+  end;
+end;
+
+function TBindingEngine.BindToControlItem(aSource, aControl: TObject): Integer;
+begin
+  DoBind(aSource, aControl, nil{aRttiProperty});
+  Result := FLastBindedControlItemIndex;
 end;
 
 constructor TBindingEngine.Create;
 begin
-  FBindItemList := TObjectList<TBindItem>.Create(False);
+  FBindItemList := TObjectList<TBindItem>.Create(True{aOwnsObjects});
   FControlNativeEvents := TDictionary<TObject, TMethod>.Create;
 
   FControlFreeNotification := TControlFreeNotification.Create(nil);
@@ -93,33 +139,24 @@ end;
 
 destructor TBindingEngine.Destroy;
 begin
-  FControlFreeNotification.Free;
-  FControlNativeEvents.Free;
   FBindItemList.Free;
+  FControlNativeEvents.Free;
+  FControlFreeNotification.Free;
 
   inherited;
 end;
 
-procedure TBindingEngine.RemoveBindItems(const aBindItems: TArray<TBindItem>);
+procedure TBindingEngine.DoBind(aSource, aControl: TObject; aRttiProperty: TRttiProperty);
 var
   BindItem: TBindItem;
 begin
-  for BindItem in aBindItems do
-  begin
-    FBindItemList.Remove(BindItem);
-    BindItem.Free;
-  end;
-end;
+  BindItem := GetBindItem(aSource, aControl);
+  if not Assigned(BindItem) then
+    BindItem := AddBindItem(aSource, aControl, aRttiProperty);
 
-function TBindingEngine.GetFirstBindItem(aControl: TObject): TBindItem;
-var
-  BindItem: TBindItem;
-begin
-  Result := nil;
-
-  for BindItem in FBindItemList do
-    if BindItem.Control = aControl then
-      Exit(BindItem);
+  FLastBindedControlItemIndex := -1;
+  ApplyToControls(BindItem, aRttiProperty);
+  BindItem.New := False;
 end;
 
 function TBindingEngine.GetBindItem(aSource, aControl: TObject): TBindItem;
@@ -144,7 +181,8 @@ begin
       Result := Result + [BindItem];
 end;
 
-function TBindingEngine.GetBindItemsBySource(aSource: TObject): TArray<TBindItem>;
+function TBindingEngine.GetBindItemsBySource(
+  aSource: TObject): TArray<TBindItem>;
 var
   BindItem: TBindItem;
 begin
@@ -155,14 +193,25 @@ begin
       Result := Result + [BindItem];
 end;
 
-function TBindingEngine.GetMatchedSourceProperty(const aControlNamePrefix, aControlName: string;
-  const RttiProperties: TArray<TRttiProperty>): TRttiProperty;
+function TBindingEngine.GetFirstBindItem(aControl: TObject): TBindItem;
+var
+  BindItem: TBindItem;
+begin
+  Result := nil;
+  for BindItem in FBindItemList  do
+    if BindItem.Control = aControl then
+      Exit(BindItem);
+end;
+
+function TBindingEngine.GetMatchedSourceProperty(const aControlNamePrefix,
+  aControlName: string;
+  const aSourceProperties: TArray<TRttiProperty>): TRttiProperty;
 var
   RttiProperty: TRttiProperty;
 begin
   Result := nil;
 
-  for RttiProperty in RttiProperties do
+  for RttiProperty in aSourceProperties do
   begin
     if RttiProperty.PropertyType.IsInstance or
        RttiProperty.PropertyType.IsRecord or
@@ -175,102 +224,93 @@ begin
   end;
 end;
 
-procedure TBindingEngine.Notify(aSource: TObject);
+function TBindingEngine.GetSource(aControl: TObject): TObject;
+var
+  BindItems: TArray<TBindItem>;
+begin
+  Result := nil;
+
+  BindItems := GetBindItemsByControl(aControl);
+  if Length(BindItems) = 1 then
+    Result := BindItems[0].Source
+  else
+  if Length(BindItems) > 1 then
+    Result := GetSourceFromControl(aControl);
+end;
+
+procedure TBindingEngine.ProcessControl(const aControlNamePrefix: string;
+  aControl, aSource: TObject; aSourceProperties: TArray<TRttiProperty>);
+var
+  ChildControl: TObject;
+  ChildControls: TArray<TObject>;
+  ControlName: string;
+  RttiProperty: TRttiProperty;
+begin
+  if IsValidControl(aControl, {out}ControlName, {out}ChildControls) then
+  begin
+    RttiProperty := GetMatchedSourceProperty(aControlNamePrefix, ControlName, aSourceProperties);
+    if Assigned(RttiProperty) then
+      DoBind(aSource, aControl, RttiProperty);
+
+    for ChildControl in ChildControls do
+      ProcessControl(aControlNamePrefix, ChildControl, aSource, aSourceProperties);
+  end;
+end;
+
+procedure TBindingEngine.RemoveBindItemsByControl(aControl: TObject);
 var
   BindItem: TBindItem;
   BindItems: TArray<TBindItem>;
-  RttiContext: TRttiContext;
-  RttiProperty: TRttiProperty;
+begin
+  BindItems := GetBindItemsByControl(aControl);
+
+  for BindItem in BindItems do
+    FBindItemList.Remove(BindItem);
+end;
+
+procedure TBindingEngine.RemoveBindItemsBySource(aSource: TObject);
+var
+  BindItem: TBindItem;
+  BindItems: TArray<TBindItem>;
 begin
   BindItems := GetBindItemsBySource(aSource);
 
-  RttiContext := TRttiContext.Create;
-  try
-    for BindItem in BindItems do
-    begin
-      RttiProperty := RttiContext.GetType(aSource.ClassType).GetProperty(BindItem.PropName);
-      BindPropertyToControl(aSource, RttiProperty, BindItem.Control);
-    end;
-  finally
-    RttiContext.Free;
+  for BindItem in BindItems do
+    FBindItemList.Remove(BindItem);
+end;
+
+procedure TBindingEngine.RemoveBind(aRootControl: TObject);
+var
+  ChildControl: TObject;
+  ChildControls: TArray<TObject>;
+  ControlName: string;
+begin
+  if IsValidControl(aRootControl, {out}ControlName, {out}ChildControls) then
+  begin
+    RemoveBindItemsByControl(aRootControl);
+
+    for ChildControl in ChildControls do
+      RemoveBind(ChildControl);
   end;
 end;
 
-function TBindingEngine.AddBindItem(aSource: TObject; const aPropName: string;
-  aControl: TObject): TBindItem;
+procedure TBindingEngine.SetLastBindedControlItemIndex(const aValue: Integer);
 begin
-  Result := TBindItem.Create;
-  Result.Source := aSource;
-  Result.PropName := aPropName;
-  Result.Control := aControl;
-
-  FBindItemList.Add(Result);
-  if aControl.InheritsFrom(TComponent) then
-    AddControlFreeNotification(TComponent(aControl));
+  FLastBindedControlItemIndex := aValue;
 end;
 
-procedure TBindingEngine.AddControlFreeNotification(aControl: TComponent);
-begin
-  aControl.FreeNotification(FControlFreeNotification);
-end;
-
-procedure TBindingEngine.AddSourceFreeNotification(aSource: TObject);
-var
-  SourceFreeNotify: ISourceFreeNotification;
-begin
-  if aSource.GetInterface(ISourceFreeNotification, SourceFreeNotify) then
-    SourceFreeNotify.AddFreeNotify(SourceFreeNotification);
-end;
-
-procedure TBindingEngine.Bind(aSource: TObject; aRootControl: TObject;
-  const aControlNamePrefix: string);
-var
-  RttiContext: TRttiContext;
-  RttiProperties: TArray<TRttiProperty>;
-begin
-  RttiContext := TRttiContext.Create;
-  try
-    RttiProperties := RttiContext.GetType(aSource.ClassType).GetProperties;
-    DoBind(aSource, aRootControl, aControlNamePrefix, RttiProperties);
-    AddSourceFreeNotification(aSource);
-  finally
-    RttiContext.Free;
-  end;
-end;
-
-procedure TBindingEngine.BindPropertyToControl(aSource: TObject;
-  aRttiProperty: TRttiProperty; aControl: TObject);
-var
-  BindItem: TBindItem;
-begin
-  BindItem := GetBindItem(aSource, aControl);
-  if Assigned(BindItem) then
-    FBindItemAlreadyExists := True
-  else
-    FBindItemAlreadyExists := False;
-end;
-
-procedure TBindingEngine.SetNativeEvent(aControl: TComponent; aMethod: TMethod);
+procedure TBindingEngine.SetNativeEvent(aControl: TObject; aMethod: TMethod);
 begin
   if not FControlNativeEvents.ContainsKey(aControl) then
     FControlNativeEvents.Add(aControl, aMethod);
 end;
 
-procedure TBindingEngine.BindToListControl(aSource: TObject; aControl: TObject);
-begin
-  DoBind(aSource, aControl, '', []);
-  AddSourceFreeNotification(aSource);
-end;
-
 procedure TBindingEngine.SourceFreeNotification(Sender: TObject);
-var
-  BindItems: TArray<TBindItem>;
 begin
-  BindItems := GetBindItemsBySource(Sender);
-  RemoveBindItems(BindItems);
+  RemoveBindItemsBySource(Sender);
 end;
 
-function TBindingEngine.TryGetNativeEvent(aControl: TComponent;
+function TBindingEngine.TryGetNativeEvent(aControl: TObject;
   out aMethod: TMethod): Boolean;
 begin
   if FControlNativeEvents.TryGetValue(aControl, aMethod) then
@@ -287,7 +327,7 @@ begin
   inherited;
 
   if Operation = opRemove then
-    FBindingEngine.ClearControl(AComponent);
+    FBindingEngine.RemoveBindItemsByControl(AComponent);
 end;
 
 end.
