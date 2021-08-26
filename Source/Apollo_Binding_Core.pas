@@ -35,6 +35,7 @@ type
     FBindItemList: TObjectList<TBindItem>;
     FControlFreeNotification: TControlFreeNotification;
     FControlNativeEvents: TDictionary<TObject, TMethod>;
+    FLastBindedControlItem: TObject;
     FLastBindedControlItemIndex: Integer;
     function AddBindItem(aSource: TObject; aControl: TObject; aRttiProperty: TRttiProperty): TBindItem;
     function GetBindItem(aSource: TObject; aControl: TObject): TBindItem;
@@ -51,16 +52,19 @@ type
     procedure RemoveBindItemsBySource(aSource: TObject);
     procedure SourceFreeNotification(Sender: TObject);
   protected
+    FControlParentItem: TObject;
     function GetFirstBindItem(aControl: TObject): TBindItem;
     function GetSourceFromControl(aControl: TObject): TObject; virtual; abstract;
     function IsValidControl(aControl: TObject; out aControlName: string;
       out aChildControls: TArray<TObject>): Boolean; virtual; abstract;
     function TryGetNativeEvent(aControl: TObject; out aMethod: TMethod): Boolean;
     procedure ApplyToControls(aBindItem: TBindItem; aRttiProperty: TRttiProperty); virtual; abstract;
+    procedure SetLastBindedControlItem(const aValue: TObject);
     procedure SetLastBindedControlItemIndex(const aValue: Integer);
     procedure SetNativeEvent(aControl: TObject; aMethod: TMethod);
   public
-    function BindToControlItem(aSource: TObject; aControl: TObject): Integer;
+    function BindToControlItem(aSource: TObject; aControl: TObject): Integer; overload;
+    function BindToControlItem(aSource: TObject; aControl: TObject; aControlParentItem: TObject): TObject; overload;
     function GetSource(aControl: TObject): TObject;
     procedure Bind(aSource: TObject; aRootControl: TObject; const aControlNamePrefix: string = '');
     procedure RemoveBind(aRootControl: TObject);
@@ -122,6 +126,14 @@ begin
   end;
 end;
 
+function TBindingEngine.BindToControlItem(aSource, aControl,
+  aControlParentItem: TObject): TObject;
+begin
+  FControlParentItem := aControlParentItem;
+  DoBind(aSource, aControl, nil{aRttiProperty});
+  Result := FLastBindedControlItem;
+end;
+
 function TBindingEngine.BindToControlItem(aSource, aControl: TObject): Integer;
 begin
   DoBind(aSource, aControl, nil{aRttiProperty});
@@ -154,6 +166,7 @@ begin
   if not Assigned(BindItem) then
     BindItem := AddBindItem(aSource, aControl, aRttiProperty);
 
+  FLastBindedControlItem := nil;
   FLastBindedControlItemIndex := -1;
   ApplyToControls(BindItem, aRttiProperty);
   BindItem.New := False;
@@ -292,6 +305,11 @@ begin
     for ChildControl in ChildControls do
       RemoveBind(ChildControl);
   end;
+end;
+
+procedure TBindingEngine.SetLastBindedControlItem(const aValue: TObject);
+begin
+  FLastBindedControlItem := aValue;
 end;
 
 procedure TBindingEngine.SetLastBindedControlItemIndex(const aValue: Integer);
