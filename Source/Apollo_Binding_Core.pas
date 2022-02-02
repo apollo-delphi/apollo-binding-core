@@ -9,7 +9,8 @@ uses
 
 type
   TPopulateProc = reference to procedure(const aIndex: Integer);
-  
+  TOnNotifyProc = reference to procedure(Source: TObject);
+
   TBindItem = class
   strict private
     FControl: TObject;
@@ -17,7 +18,10 @@ type
     FPopulateProc: TPopulateProc;
     FPropName: string;
     FSource: TObject;
+    function StrToPropertyVal(aRttiProperty: TRttiProperty; const aValue: string): Variant;
   public
+    function GetRttiProperty: TRttiProperty;
+    procedure SetNewValue(const aValue: string);
     property Control: TObject read FControl write FControl;
     property New: Boolean read FNew write FNew;
     property PopulateProc: TPopulateProc read FPopulateProc write FPopulateProc;
@@ -36,13 +40,14 @@ type
   
   TSubscriber = record
   private
-    function CheckKeyProp(aNotifySource: TObject): Boolean;
+    function CheckKeyProp(aReferSource: TObject): Boolean;
   public
-    KeyPropName: string;
     KeyPropValue: Variant;
-    NotifySourceClass: TClass;
-    [weak]Source: TObject;
-    function CheckNotifySource(aNotifySource: TObject): Boolean;
+    OnNotifyProc: TOnNotifyProc;
+    ReferClassType: TClass;
+    ReferKeyPropName: string;
+    Source: TObject;
+    function CheckReferSource(aReferSource: TObject): Boolean;
   end;
   
   TBindingEngine = class abstract
@@ -65,18 +70,16 @@ type
     procedure DoBind(aSource: TObject; aControl: TObject; aRttiProperty: TRttiProperty; aPopulateProc: TPopulateProc);
     procedure ProcessControl(const aSourcePropPrefix: string; aControl, aSource: TObject;
       aSourceProperties: TArray<TRttiProperty>);
-    procedure RemoveBindItemsByControl(aControl: TObject);
+    procedure RemoveBindItemsByControl(aControl: TObject; const aRemoveFromNativeEvents: Boolean);
     procedure RemoveBindItemsBySource(aSource: TObject);
     procedure SourceFreeNotification(Sender: TObject);
   protected
     FControlParentItem: TObject;
     function GetFirstBindItemHavingProp(aControl: TObject): TBindItem;
-    function GetRttiProperty(aInstance: TObject; const aPropName: string): TRttiProperty;
     function GetSourceFromControl(aControl: TObject): TObject; virtual; abstract;
     function IsValidControl(aControl: TObject; out aControlName: string;
       out aChildControls: TArray<TObject>): Boolean; virtual; abstract;
     function PropertyValToStr(aRttiProperty: TRttiProperty; aSource: TObject): string;
-    function StrToPropertyVal(aRttiProperty: TRttiProperty; const aValue: string): Variant;
     function TryGetNativeEvent(aControl: TObject; out aMethod: TMethod): Boolean;
     procedure ApplyToControls(aBindItem: TBindItem; aRttiProperty: TRttiProperty); virtual; abstract;
     procedure SetLastBindedControlItem(const aValue: TObject);
@@ -89,8 +92,8 @@ type
     procedure Bind(aSource: TObject; aRootControl: TObject; const aSourcePropPrefix: string = '');
     procedure Notify(aSource: TObject);
     procedure RemoveBind(aRootControl: TObject);
-    procedure SubscribeNotification(aSource: TObject; aNotifySourceType: TClass; const aKeyPropName: string;
-      const aKeyPropValue: Variant);
+    procedure SubscribeNotification(aSource: TObject; aReferClassType: TClass; const aReferKeyPropName: string;
+      const aKeyPropValue: Variant; aOnNotifyProc: TOnNotifyProc);
     constructor Create;
     destructor Destroy; override;
   end;
@@ -281,21 +284,6 @@ begin
   end;
 end;
 
-function TBindingEngine.GetRttiProperty(aInstance: TObject;
-  const aPropName: string): TRttiProperty;
-var
-  RttiContext: TRttiContext;
-  RttiProperties: TArray<TRttiProperty>;
-  RttiProperty: TRttiProperty;
-begin
-  Result := nil;
-
-  RttiProperties := RttiContext.GetType(aInstance.ClassType).GetProperties;
-  for RttiProperty in RttiProperties do
-    if RttiProperty.Name = aPropName then
-      Exit(RttiProperty);
-end;
-
 function TBindingEngine.GetSource(aControl: TObject): TObject;
 var
   BindItems: TArray<TBindItem>;
@@ -322,8 +310,12 @@ begin
   BindItems := GetBindItemsBySource(aSource);
   for Subscriber in FSubscribers do
   begin
-    if Subscriber.CheckNotifySource(aSource) then
+    if Subscriber.CheckReferSource(aSource) then
+    begin
       BindItems := BindItems + GetBindItemsBySource(Subscriber.Source);
+      if Assigned(Subscriber.OnNotifyProc) then
+        Subscriber.OnNotifyProc(Subscriber.Source);
+    end;
   end;
 
   RttiContext := TRttiContext.Create;
@@ -379,7 +371,8 @@ begin
     Result := aRttiProperty.GetValue(aSource).AsVariant;
 end;
 
-procedure TBindingEngine.RemoveBindItemsByControl(aControl: TObject);
+procedure TBindingEngine.RemoveBindItemsByControl(aControl: TObject;
+  const aRemoveFromNativeEvents: Boolean);
 var
   BindItem: TBindItem;
   BindItems: TArray<TBindItem>;
@@ -390,7 +383,7 @@ begin
   for BindItem in BindItems do
     FBindItemList.Remove(BindItem);
 
-  if FControlNativeEvents.TryGetValue(aControl, {out}Method) then
+  if aRemoveFromNativeEvents and FControlNativeEvents.TryGetValue(aControl, {out}Method) then
     FControlNativeEvents.Remove(aControl);
 end;
 
@@ -404,6 +397,7 @@ begin
 
   for BindItem in BindItems do
     FBindItemList.Remove(BindItem);
+
   for i := Length(FSubscribers) - 1 downto 0 do
     if FSubscribers[i].Source = aSource then
       Delete(FSubscribers, i, 1);
@@ -417,7 +411,7 @@ var
 begin
   IsValidControl(aRootControl, {out}ControlName, {out}ChildControls);
 
-  RemoveBindItemsByControl(aRootControl);
+  RemoveBindItemsByControl(aRootControl, False{aRemoveFromNativeEvents});
   for ChildControl in ChildControls do
     RemoveBind(ChildControl);
 end;
@@ -445,22 +439,8 @@ begin
   RemoveBindItemsBySource(Sender);
 end;
 
-function TBindingEngine.StrToPropertyVal(aRttiProperty: TRttiProperty; const aValue: string): Variant;
-begin
-  if aRttiProperty.PropertyType.Name = 'TDateTime' then
-    Result := StrToDateTimeDef(aValue, 0)
-  else
-  if aRttiProperty.PropertyType.TypeKind in [tkInteger] then
-    Result := StrToIntDef(aValue, 0)
-  else
-  if aRttiProperty.PropertyType.TypeKind in [tkFloat] then
-    Result := StrToFloatDef(aValue, 0)
-  else
-    Result := aValue;
-end;
-
-procedure TBindingEngine.SubscribeNotification(aSource: TObject; aNotifySourceType: TClass;
-  const aKeyPropName: string; const aKeyPropValue: Variant);
+procedure TBindingEngine.SubscribeNotification(aSource: TObject; aReferClassType: TClass;
+  const aReferKeyPropName: string; const aKeyPropValue: Variant; aOnNotifyProc: TOnNotifyProc);
 var
   AlreadySubscribed: Boolean;
   i: Integer;
@@ -468,7 +448,7 @@ var
 begin
   AlreadySubscribed := False;
   for i := 0 to Length(FSubscribers) - 1 do
-    if (FSubscribers[i].Source = aSource) and (FSubscribers[i].NotifySourceClass = aNotifySourceType) then
+    if (FSubscribers[i].Source = aSource) and (FSubscribers[i].ReferClassType = aReferClassType) then
     begin
       AlreadySubscribed := True;
       Break;
@@ -477,9 +457,10 @@ begin
   if not(AlreadySubscribed) then
   begin
     Subscriber.Source := aSource;
-    Subscriber.NotifySourceClass := aNotifySourceType;
-    Subscriber.KeyPropName := aKeyPropName;
+    Subscriber.ReferClassType := aReferClassType;
+    Subscriber.ReferKeyPropName := aReferKeyPropName;
     Subscriber.KeyPropValue := aKeyPropValue;
+    Subscriber.OnNotifyProc := aOnNotifyProc;
 
     FSubscribers := FSubscribers + [Subscriber];
   end;
@@ -507,12 +488,12 @@ begin
   inherited;
 
   if Operation = opRemove then
-    FBindingEngine.RemoveBindItemsByControl(AComponent);
+    FBindingEngine.RemoveBindItemsByControl(AComponent, True{aRemoveFromNativeEvents});
 end;
 
 { TSubscriber }
 
-function TSubscriber.CheckKeyProp(aNotifySource: TObject): Boolean;
+function TSubscriber.CheckKeyProp(aReferSource: TObject): Boolean;
 var
   RttiContext: TRttiContext;
   RttiProperty: TRttiProperty;
@@ -520,22 +501,69 @@ begin
   Result := False;
   RttiContext := TRttiContext.Create;
   try
-    RttiProperty := RttiContext.GetType(NotifySourceClass).GetProperty(KeyPropName);
-    if Assigned(RttiProperty) and (RttiProperty.GetValue(aNotifySource).AsVariant = KeyPropValue) then
+    RttiProperty := RttiContext.GetType(ReferClassType).GetProperty(ReferKeyPropName);
+    if Assigned(RttiProperty) and (RttiProperty.GetValue(aReferSource).AsVariant = KeyPropValue) then
       Result := True;
   finally
     RttiContext.Free;
   end;
 end;
 
-function TSubscriber.CheckNotifySource(aNotifySource: TObject): Boolean;
+function TSubscriber.CheckReferSource(aReferSource: TObject): Boolean;
 begin
   Result := False;
 
-  if (aNotifySource.ClassType = NotifySourceClass) and
-     CheckKeyProp(aNotifySource)
+  if (aReferSource.ClassType = ReferClassType) and
+     (aReferSource <> Source) and
+     CheckKeyProp(aReferSource)
   then
     Result := True;
+end;
+
+{ TBindItem }
+
+function TBindItem.GetRttiProperty: TRttiProperty;
+var
+  RttiContext: TRttiContext;
+  RttiProperties: TArray<TRttiProperty>;
+  RttiProperty: TRttiProperty;
+begin
+  Result := nil;
+
+  RttiContext := TRttiContext.Create;
+  try
+    RttiProperties := RttiContext.GetType(Source.ClassType).GetProperties;
+    for RttiProperty in RttiProperties do
+      if RttiProperty.Name = PropName then
+        Exit(RttiProperty);
+  finally
+    RttiContext.Free;
+  end;
+end;
+
+procedure TBindItem.SetNewValue(const aValue: string);
+var
+  RttiProperty: TRttiProperty;
+  Value: Variant;
+begin
+  RttiProperty := GetRttiProperty;
+  Value := StrToPropertyVal(RttiProperty, aValue);
+  RttiProperty.SetValue(Source, TValue.FromVariant(Value));
+end;
+
+function TBindItem.StrToPropertyVal(aRttiProperty: TRttiProperty;
+  const aValue: string): Variant;
+begin
+  if aRttiProperty.PropertyType.Name = 'TDateTime' then
+    Result := StrToDateTimeDef(aValue, 0)
+  else
+  if aRttiProperty.PropertyType.TypeKind in [tkInteger] then
+    Result := StrToIntDef(aValue, 0)
+  else
+  if aRttiProperty.PropertyType.TypeKind in [tkFloat] then
+    Result := StrToFloatDef(aValue, 0)
+  else
+    Result := aValue;
 end;
 
 end.
