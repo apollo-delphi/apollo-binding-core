@@ -9,7 +9,7 @@ uses
 
 type
   TPopulateProc = reference to procedure(const aIndex: Integer);
-  TOnNotifyProc = reference to procedure(Source: TObject);
+  TOnNotifyProc = reference to procedure(aSource: TObject);
 
   TBindItem = class
   strict private
@@ -20,7 +20,7 @@ type
     FSource: TObject;
     function StrToPropertyVal(aRttiProperty: TRttiProperty; const aValue: string): Variant;
   public
-    function GetRttiProperty: TRttiProperty;
+    function GetRttiProperty(const aRttiContext: TRttiContext): TRttiProperty;
     procedure SetNewValue(const aValue: string);
     property Control: TObject read FControl write FControl;
     property New: Boolean read FNew write FNew;
@@ -522,33 +522,33 @@ end;
 
 { TBindItem }
 
-function TBindItem.GetRttiProperty: TRttiProperty;
+function TBindItem.GetRttiProperty(const aRttiContext: TRttiContext): TRttiProperty;
 var
-  RttiContext: TRttiContext;
   RttiProperties: TArray<TRttiProperty>;
   RttiProperty: TRttiProperty;
 begin
   Result := nil;
 
-  RttiContext := TRttiContext.Create;
-  try
-    RttiProperties := RttiContext.GetType(Source.ClassType).GetProperties;
-    for RttiProperty in RttiProperties do
-      if RttiProperty.Name = PropName then
-        Exit(RttiProperty);
-  finally
-    RttiContext.Free;
-  end;
+  RttiProperties := aRttiContext.GetType(Source.ClassType).GetProperties;
+  for RttiProperty in RttiProperties do
+    if RttiProperty.Name = PropName then
+      Exit(RttiProperty);
 end;
 
 procedure TBindItem.SetNewValue(const aValue: string);
 var
+  RttiContext: TRttiContext;
   RttiProperty: TRttiProperty;
   Value: Variant;
 begin
-  RttiProperty := GetRttiProperty;
-  Value := StrToPropertyVal(RttiProperty, aValue);
-  RttiProperty.SetValue(Source, TValue.FromVariant(Value));
+  RttiContext := TRttiContext.Create;
+  try
+    RttiProperty := GetRttiProperty(RttiContext);
+    Value := StrToPropertyVal(RttiProperty, aValue);
+    RttiProperty.SetValue(Source, TValue.FromVariant(Value));
+  finally
+    RttiContext.Free;
+  end;
 end;
 
 function TBindItem.StrToPropertyVal(aRttiProperty: TRttiProperty;
