@@ -89,7 +89,8 @@ type
     function BindToControlItem(aSource: TObject; aControl: TObject; aPopulateProc: TPopulateProc): Integer; overload;
     function BindToControlItem(aSource: TObject; aControl: TObject; aControlParentItem: TObject): TObject; overload;
     function GetSource(aControl: TObject): TObject;
-    procedure Bind(aSource: TObject; aRootControl: TObject; const aSourcePropPrefix: string = '');
+    procedure Bind(aSource: TObject; aOnNotifyProc: TOnNotifyProc); overload;
+    procedure Bind(aSource: TObject; aRootControl: TObject; const aSourcePropPrefix: string = ''); overload;
     procedure Notify(aSource: TObject);
     procedure RemoveBind(aRootControl: TObject);
     procedure SubscribeNotification(aSource: TObject; aReferClassType: TClass; const aReferKeyPropName: string;
@@ -103,7 +104,8 @@ implementation
 uses
   Apollo_Types,
   System.Character,
-  System.SysUtils;
+  System.SysUtils,
+  System.Variants;
 
 { TBindingEngine }
 
@@ -153,6 +155,22 @@ begin
   finally
     RttiContext.Free;
   end;
+end;
+
+procedure TBindingEngine.Bind(aSource: TObject; aOnNotifyProc: TOnNotifyProc);
+var
+  Subscriber: TSubscriber;
+begin
+  Subscriber.Source := aSource;
+  Subscriber.ReferClassType := nil;
+  Subscriber.ReferKeyPropName := '';
+  Subscriber.KeyPropValue := Null;
+  Subscriber.OnNotifyProc := aOnNotifyProc;
+
+  FSubscribers := FSubscribers + [Subscriber];
+
+  if Assigned(aOnNotifyProc) then
+    aOnNotifyProc(aSource);
 end;
 
 function TBindingEngine.BindToControlItem(aSource, aControl,
@@ -315,6 +333,15 @@ begin
       BindItems := BindItems + GetBindItemsBySource(Subscriber.Source);
       if Assigned(Subscriber.OnNotifyProc) then
         Subscriber.OnNotifyProc(Subscriber.Source);
+
+      Continue;
+    end;
+
+    if (Subscriber.Source = aSource) and Assigned(Subscriber.OnNotifyProc) then
+    begin
+      Subscriber.OnNotifyProc(Subscriber.Source);
+
+      Continue;
     end;
   end;
 
